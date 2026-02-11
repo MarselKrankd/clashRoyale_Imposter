@@ -11,9 +11,9 @@ def imposter(players):
             role[player]="Imposter)"
         else:
             role[player]=card
-    print(role)
+    return role 
 
-imposter(('rob','hog', 'ebenya'))
+
 
 
 
