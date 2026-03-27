@@ -1,29 +1,19 @@
 from fastapi import FastAPI
-from skelet import imposter
-from typing import List
-import random
-import uuid
-import string
+from fastapi.staticfiles import StaticFiles
+from app.api import auth, game, websocket
+from app.services.db_card import seed_cards
 
-game_rooms={}
+app = FastAPI(title="Clash Royale Imposter")
 
-app = FastAPI()
+seed_cards()
 
-@app.get("/")
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
+
+app.include_router(auth.router, prefix="/auth", tags=["Auth"])
+app.include_router(game.router, prefix="/game", tags=["Game"])
+app.include_router(websocket.router, tags=["Websocket"])
+
+@app.get("/", tags=["System"])
 def read_root():
-    return {"status": "Def noob API"}
-
-@app.post("/get-roles")
-def game_roles(players :List[str]):
-    result=imposter(players)
-    return result
-
-@app.post("/create-room")
-def create_room():
-    room_id=str(uuid.uuid4())
-    password="".join(random.choices(string.ascii_uppercase + string.digits, k=5))
-    game_rooms[room_id] = {"password": password, "players": []}
-    return {"room_id": room_id, "password": password}
-    
-    
-
+    return {"status": "running", "mode": "def noob api"}
