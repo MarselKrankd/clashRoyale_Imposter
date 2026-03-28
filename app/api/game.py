@@ -5,36 +5,59 @@ import random
 import string
 import app.db.models as models
 from app.db.session import get_db
-from app.schemas.schemas import RoomCreateRequest, JoinRoomRequest, LeaveRoomRequest
+from app.schemas.schemas import (RoomCreateRequest, JoinRoomRequest, LeaveRoomRequest, 
+RoomListResponse, RoomCreateResponse, RoomParticipantsResponse, SimpleStatusResponse, PlayerRoleResponse)
 from app.services.game_logic import imposter
 from app.services.manager import manager
+from typing import List
 
 router = APIRouter()
 
-@router.post("/create-room")
-def create_room(data: RoomCreateRequest, db: Session = Depends(get_db)):
-    host_user = db.query(models.User).filter(models.User.player_id == data.player_id).first()
-    if not host_user:
-        raise HTTPException(status_code=404, detail="Игрок не найден")
+def check_player(player_id: str, db: Session):
+    exists = db.query(models.RoomParticipant).filter(models.RoomParticipant.player_id == player_id).first()
+    if exists:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, 
+            detail=f"Вы находитесь в другой комнаие (ID: {exists.room_name})"
+        )
 
+
+@router.get("/rooms", response_model=List[RoomListResponse])
+def list_rooms(db: Session = Depends(get_db)):
+    rooms = db.query(models.Room).all()
+    return rooms
+
+@router.post("/create-room", response_model=RoomCreateResponse)
+def create_room(data: RoomCreateRequest, db: Session = Depends(get_db)):
+    check_player(data.player_id, db)
+    host = db.query(models.User).filter(models.User.player_id == data.player_id).first()
+    if not host:
+        raise HTTPException(status_code=404, detail="Игрок не найден")
+    
     room_id = str(uuid.uuid4())
     room_password = "".join(random.choices(string.ascii_uppercase + string.digits, k=5))
+    new_room = models.Room(
+        room_id=room_id, 
+        room_name=data.room_name, 
+        room_pass=room_password, 
+        host_id=host.player_id
+    )
+    new_participant = models.RoomParticipant(room_id=room_id, player_id=host.player_id)
 
-    new_room = models.Room(room_id=room_id, room_pass=room_password, host_id=host_user.player_id)
-    new_participant = models.RoomParticipant(room_id=room_id, player_id=host_user.player_id)
-    
     db.add(new_room)
     db.add(new_participant)
     db.commit()
     
     return {
         "room_id": room_id, 
+        "room_name": data.room_name,
         "password": room_password, 
-        "host_name": host_user.name
+        "host_name": host.name
     }
 
-@router.post("/join-room")
+@router.post("/join-room", response_model=SimpleStatusResponse)
 def join_room(data: JoinRoomRequest, db: Session = Depends(get_db)):
+    check_player(data.player_id, db)
     player = db.query(models.User).filter(models.User.player_id == data.player_id).first()
     if not player:
         raise HTTPException(status_code=404, detail="Игрок не существует")
@@ -46,21 +69,46 @@ def join_room(data: JoinRoomRequest, db: Session = Depends(get_db)):
     if data.password != room.room_pass:
         raise HTTPException(status_code=401, detail="Неверный пароль")
         
-    already_in = db.query(models.RoomParticipant).filter(
-        models.RoomParticipant.room_id == data.room_id,
-        models.RoomParticipant.player_id == data.player_id
-    ).first()
-    
-    if already_in:
-        return {"status": "already joined", "room_id": data.room_id}
-
     new_participant = models.RoomParticipant(room_id=data.room_id, player_id=data.player_id)
     db.add(new_participant)
     db.commit()
     
-    return {"status": "joined", "room_id": data.room_id, "player_name": player.name}
+    return {"status": "joined"}
 
-@router.post("/game-start")
+@router.post("/leave-room", response_model=SimpleStatusResponse)
+async def leave_room(data: LeaveRoomRequest, db: Session = Depends(get_db)):
+    participant = db.query(models.RoomParticipant).filter(
+        models.RoomParticipant.room_id == data.room_id,
+        models.RoomParticipant.player_id == data.player_id
+    ).first()
+    if not participant:
+        raise HTTPException(status_code=404, detail="Вы не участник этой комнаты")
+
+    room = db.query(models.Room).filter(models.Room.room_id == data.room_id).first()
+    if room and room.host_id == data.player_id:
+        db.query(models.RoomParticipant).filter(models.RoomParticipant.room_id == data.room_id).delete()
+        db.delete(room)
+        await manager.broadcast_to_room(data.room_id, {"event": "room_closed", "message": "Хост покинул игру"})
+    else:
+        db.delete(participant)
+        await manager.broadcast_to_room(data.room_id, {"event": "player_left", "player_id": data.player_id})  
+    db.commit()
+    return {"status": "left"}
+
+@router.get("/room-participants/{room_id}", response_model=RoomParticipantsResponse)
+def get_participants(room_id: str, db: Session = Depends(get_db)):
+    participants = db.query(models.RoomParticipant).filter(models.RoomParticipant.room_id == room_id).all()
+    
+    player_id = [p.player_id for p in participants]
+    users = db.query(models.User).filter(models.User.player_id.in_(player_id)).all()
+    
+    return {
+        "room_id": room_id,
+        "count": len(users),
+        "players": [{"name": u.name, "player_id": u.player_id} for u in users]
+    }
+
+@router.post("/game-start", response_model=SimpleStatusResponse)
 async def start_game(room_id: str, player_id: str, db: Session = Depends(get_db)):
     room = db.query(models.Room).filter(models.Room.room_id == room_id).first()
     if not room or room.host_id != player_id:
@@ -88,7 +136,7 @@ async def start_game(room_id: str, player_id: str, db: Session = Depends(get_db)
     
     return {"status": "game_started"}
 
-@router.get("/get-my-role")
+@router.get("/get-my-role", response_model=PlayerRoleResponse) 
 def get_my_role(room_id: str, player_id: str, db: Session = Depends(get_db)):
     participant = db.query(models.RoomParticipant).filter(
         models.RoomParticipant.room_id == room_id,
@@ -97,10 +145,13 @@ def get_my_role(room_id: str, player_id: str, db: Session = Depends(get_db)):
 
     if not participant or not participant.role:
         return {"status": "waiting", "role": None}
-
-    if participant.role == "Imposter":
-        return {"status": "active", "role": "Imposter", "card_name": "ШПИОН"}
     
+    if participant.role == "Imposter":
+        return {
+            "status": "active", 
+            "role": "Imposter", 
+            "card_name": "ШПИОН"
+        }
     card = db.query(models.Card).filter(models.Card.card_name == participant.role).first()
     return {
         "status": "active", 
@@ -110,7 +161,7 @@ def get_my_role(room_id: str, player_id: str, db: Session = Depends(get_db)):
         "elixir": card.elixir_cost
     }
 
-@router.post("/game-reset")
+@router.post("/game-reset", response_model=SimpleStatusResponse)
 async def reset_game(room_id: str, player_id: str, db: Session = Depends(get_db)):
     room = db.query(models.Room).filter(models.Room.room_id == room_id).first()
     if not room or room.host_id != player_id:

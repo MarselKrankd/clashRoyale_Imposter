@@ -18,6 +18,9 @@ class ConnectionManager:
     async def broadcast_to_room(self, room_id: str, message: dict):
         if room_id in self.active_connections:
             for connection in self.active_connections[room_id].values():
-                await connection.send_json(message)
+                try:
+                    await connection.send_json(message)
+                except Exception:
+                    pass
 
 manager = ConnectionManager()

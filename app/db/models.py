@@ -22,6 +22,7 @@ class Room(Base):
     room_id = Column(String, unique=True, index=True)
     room_pass = Column(String)
     host_id = Column(String) 
+    room_name = Column(String)
 
 class RoomParticipant(Base):
     __tablename__ = "room_participants"
