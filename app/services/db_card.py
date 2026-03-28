@@ -18,7 +18,6 @@ def seed_cards():
     
     db.commit()
     db.close()
-    print("Все карты из списка в базе")
-
+    
 if __name__ == "__main__":
     seed_cards()
